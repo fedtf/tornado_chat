@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter.filedialog import askopenfilename
 from tkinter.simpledialog import askstring
 from tkinter.messagebox import askquestion
+from tkinter import scrolledtext
 
 from tornado import tcpclient, tcpserver, ioloop, iostream, gen
 
@@ -25,6 +26,7 @@ class TornadoThread(threading.Thread):
     def run(self):
         self.loop = ioloop.IOLoop.current()
         self.loop.start()
+
     def stop(self):
         self.loop.stop()
 
@@ -37,6 +39,11 @@ class ChatClient(tcpclient.TCPClient):
 
     @gen.coroutine
     def connect(self, nickname):
+        """
+        Tries to connect to the server, returns True if connects,
+        raises NicknameNotAvailableException,
+        if there is a user with such nick.
+        """
         try:
             self.stream = yield super(ChatClient, self).connect(HOST, PORT)
         except iostream.StreamClosedError:
@@ -58,6 +65,12 @@ class ChatClient(tcpclient.TCPClient):
 
     @gen.coroutine
     def receive(self, stream=None):
+        """
+        Receives messages from stream, gets message
+        length by number before "|" separator.
+        :param stream: Stream to get the message from,
+        if not provided defaults to self.stream.
+        """
         if not stream:
             stream = self.stream
         data_size = yield stream.read_until(b"|")
@@ -66,7 +79,11 @@ class ChatClient(tcpclient.TCPClient):
         return json.loads(data.decode("utf8"))
 
     @gen.coroutine
-    def receive_loop(self):
+    def receive_loop(self, callback=None):
+        """
+        Infinite loop for receiving messages, if callback is
+        given, it will be called with received message argument.
+        """
         while True:
             try:
                 received = yield self.receive()
@@ -82,6 +99,8 @@ class ChatClient(tcpclient.TCPClient):
                 receiver_host, receiver_port, file_id = received["content"]
                 self.send_file(file_id=file_id,
                                to=(receiver_host, receiver_port))
+            if callback:
+                callback(received)
 
     def on_message(self, message):
         raise NotImplemented("You should provide on_message handler")
@@ -94,6 +113,11 @@ class ChatClient(tcpclient.TCPClient):
 
     @gen.coroutine
     def send_data(self, content, message_type="message", stream=None):
+        """
+        Encodes given message and sends it to the stream, if stream
+        argument is given, will use the one in the argument,
+        self.stream otherwise.
+        """
         if not stream:
             stream = self.stream
         data = json.dumps({"content": content,
@@ -108,6 +132,10 @@ class ChatClient(tcpclient.TCPClient):
         self.send_data(room_name, message_type="enter_room")
 
     def create_peer_link(self, file_path):
+        """
+        Maps local filepath to uuid and sends uuid to the server,
+        for creating a download link.
+        """
         if not os.path.exists(file_path):
             raise OSError("Filepath {} does not exist, refusing "
                           "to make link.".format(file_path))
@@ -120,6 +148,12 @@ class ChatClient(tcpclient.TCPClient):
 
     @gen.coroutine
     def send_file(self, file_path=None, file_id=None, to=(HOST, PORT)):
+        """
+        Sends file given by file_path or file_id
+        creating a new connection to given host and port.
+        :param file_id: May be used instead of file_path,
+        if its in the self.files dict.
+        """
         if file_id:
             file_path = self.files[file_id]
         elif not file_path:
@@ -148,6 +182,10 @@ class ChatClient(tcpclient.TCPClient):
 
     @gen.coroutine
     def download_file(self, file_id, file_name):
+        """
+        Creates a TCP server and sends request to download file.
+        :param file_name: Name to save the file with.
+        """
 
         class Downloader(tcpserver.TCPServer):
             chat_client = self
@@ -165,6 +203,8 @@ class ChatClient(tcpclient.TCPClient):
                                                             partial=True)
                             f.write(chunk)
                             received += FILE_CHUNK_SIZE
+                    self.chat_client.on_message("File {} was downloaded."
+                                                .format(file_name))
                 else:
                     self.chat_client.on_message("Unfortunately, the file {} "
                                                 "is not currently "
@@ -191,7 +231,7 @@ class MainApplication(tk.Frame, ChatClient):
         self.name.set("")
         self.text.set("")
 
-        self.log = tk.Text(self.parent)
+        self.log = scrolledtext.ScrolledText(self.parent)
         self.log.config(state=tk.DISABLED)
         self.log.tag_config("hyperlink", foreground="blue", underline=1)
         self.log.tag_bind("hyperlink", "<Button-1>", self.hyperlink_click)
@@ -228,6 +268,10 @@ class MainApplication(tk.Frame, ChatClient):
         self.room_buttons = []
 
     def load_file(self):
+        """
+        Opens dialogs to choose a file and then to
+        choose uploading options.
+        """
         file_path = askopenfilename()
         if file_path:
             question = ("Do you want to upload your file to the server "
@@ -236,13 +280,21 @@ class MainApplication(tk.Frame, ChatClient):
             if uploading == "yes":
                 self.send_file(file_path)
             else:
-                self.create_peer_link(file_path)
+                try:
+                    self.create_peer_link(file_path)
+                except OSError as err:
+                    self.on_message(str(err))
 
     @gen.coroutine
     def send_message(self):
-        yield super(MainApplication, self).send_data(self.text.get())
-        self.print_message("<You>: {}".format(self.text.get()))
-        self.text.set("")
+        """
+        Sends the string in the Entry to the server as a message,
+        and prints it to the user.
+        """
+        if self.text.get():
+            yield super(MainApplication, self).send_data(self.text.get())
+            self.print_message("<You>: {}".format(self.text.get()))
+            self.text.set("")
 
     @gen.coroutine
     def toggle_connect(self):
@@ -276,9 +328,14 @@ class MainApplication(tk.Frame, ChatClient):
         self.print_message(message)
 
     def print_message(self, message, br=True, tags=[]):
+        """
+        :param br: Add new line after message.
+        :param tags: List of tags to add to the message.
+        """
         self.log.config(state=tk.NORMAL)
         pattern = "{}\n" if br else "{}"
         self.log.insert(tk.END, pattern.format(message), tags)
+        self.log.see(tk.END)
         self.log.config(state=tk.DISABLED)
 
     def on_file_link(self, file_info):
@@ -291,6 +348,10 @@ class MainApplication(tk.Frame, ChatClient):
         self.download_file(file_id, file_name)
 
     def on_room_update(self, rooms):
+        """
+        Updates room buttons.
+        :param rooms: List of room names.
+        """
         [button.destroy() for button in self.room_buttons]
         self.room_buttons = []
         for room in rooms:
@@ -300,6 +361,9 @@ class MainApplication(tk.Frame, ChatClient):
             self.room_buttons.append(room_button)
 
     def create_room(self):
+        """
+        Shows dialog and creates a new room with provided name.
+        """
         room_name = askstring("Create room", "New room name:")
         if room_name:
             super(MainApplication, self).create_room(room_name)
