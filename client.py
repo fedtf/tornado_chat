@@ -203,7 +203,7 @@ class ChatClient(tcpclient.TCPClient):
                                                             partial=True)
                             f.write(chunk)
                             received += FILE_CHUNK_SIZE
-                    self.chat_client.on_message("File {} was downloaded."
+                    self.chat_client.on_message("File {} has been downloaded."
                                                 .format(file_name))
                 else:
                     self.chat_client.on_message("Unfortunately, the file {} "
